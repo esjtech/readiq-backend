@@ -15,11 +15,5 @@ services:
         sync: false
       - key: OPENAI_API_KEY      # optional: AI voice + audio transcription
         sync: false
-      - key: MONNIFY_API_KEY
+      - key: PAYSTACK_SECRET_KEY   # sk_test_... while testing, sk_live_... for real money
         sync: false
-      - key: MONNIFY_SECRET_KEY
-        sync: false
-      - key: MONNIFY_CONTRACT_CODE
-        sync: false
-      - key: MONNIFY_BASE_URL
-        value: https://sandbox.monnify.com   # switch to https://api.monnify.com when going live

@@ -8,11 +8,11 @@ const { ApiError, sendError } = require("./lib/errors");
 const { PLANS, DAY_MS, subscriptionOf, nextExpiry } = require("./lib/plans");
 const credits = require("./lib/credits");
 const ai = require("./lib/ai");
-const monnify = require("./lib/monnify");
+const paystack = require("./lib/paystack");
 
 const app = express();
 app.set("trust proxy", 1);
-app.use(express.json({ limit: "5mb" }));
+app.use(express.json({ limit: "5mb", verify: (req, _res, buf) => { req.rawBody = buf; } })); // rawBody is needed to check Paystack webhook signatures
 app.use(rateLimit({ windowMs: 60_000, max: 90, standardHeaders: true, legacyHeaders: false }));
 
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => sendError(res, e));
@@ -25,6 +25,29 @@ app.get("/", (_q, r) => r.json({ name: "ReadIQ API", ok: true }));
 app.get("/health", (_q, r) => r.json({ ok: true }));
 app.get("/api/payment-callback", (_q, r) =>
   r.type("html").send("<!doctype html><meta name=viewport content='width=device-width,initial-scale=1'><body style='font-family:sans-serif;text-align:center;padding:48px'><h3>Payment received</h3><p>Returning you to ReadIQ…</p>"));
+
+// ───────────── Paystack webhook (no Firebase auth; verified by signature) ─────────────
+// In the Paystack dashboard set the webhook URL to  https://<your-service>.onrender.com/webhook/paystack
+// It credits a purchase even if the person closes the app before the app verifies it.
+app.post("/webhook/paystack", async (req, res) => {
+  try {
+    if (!paystack.validSignature(req.rawBody, req.headers["x-paystack-signature"])) return res.sendStatus(401);
+    const ev = req.body || {};
+    if (ev.event === "charge.success" && ev.data?.reference) {
+      const ref = db.collection("payments").doc(String(ev.data.reference));
+      const snap = await ref.get();
+      if (snap.exists && snap.data().status !== "PAID") {
+        const v = { status: ev.data.status, currency: ev.data.currency, amountKobo: Number(ev.data.amount) };
+        if (paidInFull(v, snap.data())) await grantPayment(ref);
+        else console.error("Webhook: payment doesn't match plan price", ev.data.reference);
+      }
+    }
+    res.sendStatus(200);
+  } catch (e) {
+    console.error("Webhook error", e.message);
+    res.sendStatus(500); // Paystack will retry
+  }
+});
 
 // ───────────── Auth: every /api route below needs a Firebase ID token ─────────────
 app.use("/api", async (req, res, next) => {
@@ -235,7 +258,7 @@ app.post("/api/start-trial", wrap(async (req, res) => {
   res.json({ success: true, tier: "PREMIUM", plan: "trial", premiumExpiryMs: out });
 }));
 
-// ───────────── Payments (Monnify) ─────────────
+// ───────────── Payments (Paystack) ─────────────
 app.post("/api/init-payment", wrap(async (req, res) => {
   const planKey = String(req.body.plan || "");
   const plan = PLANS[planKey];
@@ -243,57 +266,54 @@ app.post("/api/init-payment", wrap(async (req, res) => {
   const email = req.email || String(req.body.email || "").trim();
   if (!email) throw new ApiError(400, "NO_EMAIL", "We need an email address on your account to take payment.");
 
-  const paymentReference = `RIQ${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
-  const base = publicUrl();
-  const init = await monnify.initTransaction({
-    amount: plan.amount,
-    customerName: ai.clip(req.body.name || "ReadIQ User", 80),
-    customerEmail: email,
-    paymentReference,
-    paymentDescription: plan.label,
-    redirectUrl: `${base}/api/payment-callback`,
+  const reference = `RIQ${Date.now()}${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  const init = await paystack.initTransaction({
+    amountNaira: plan.amount, email, reference,
+    callbackUrl: `${publicUrl()}/api/payment-callback`,
+    metadata: { uid: req.uid, plan: planKey },
   });
 
-  await db.collection("payments").doc(paymentReference).set({
+  await db.collection("payments").doc(reference).set({
     uid: req.uid, plan: planKey, amount: plan.amount, status: "PENDING",
-    transactionReference: init.transactionReference, createdAt: Date.now(),
+    transactionReference: reference, createdAt: Date.now(),
   });
-  res.json({ success: true, checkoutUrl: init.checkoutUrl, transactionReference: init.transactionReference });
+  // The app calls the Paystack reference its "transactionReference".
+  res.json({ success: true, checkoutUrl: init.checkoutUrl, transactionReference: reference });
 }));
 
-async function findPayment(reference) {
-  const q = await db.collection("payments").where("transactionReference", "==", reference).limit(1).get();
-  if (!q.empty) return q.docs[0];
-  const d = await db.collection("payments").doc(reference).get();
-  return d.exists ? d : null;
+/** Marks a payment PAID and gives the plan to its owner. Safe to call twice. */
+async function grantPayment(payRef) {
+  await db.runTransaction(async (t) => {
+    const p = await t.get(payRef);
+    const pay = p.data();
+    if (!p.exists || pay.status === "PAID") return;
+    const plan = PLANS[pay.plan];
+    const u = (await t.get(userRef(pay.uid))).data() || {};
+    t.set(userRef(pay.uid), {
+      subscriptionTier: plan.tier, premiumPlan: pay.plan,
+      premiumExpiryMs: nextExpiry(u, plan.tier, plan.days), lastPaymentAt: Date.now(),
+    }, { merge: true });
+    t.update(payRef, { status: "PAID", paidAt: Date.now() });
+  });
 }
+
+const paidInFull = (v, pay) => v.status === "success" && v.currency === "NGN" && v.amountKobo >= pay.amount * 100;
 
 app.post("/api/verify-payment", wrap(async (req, res) => {
   const reference = String(req.body.reference || "").trim();
   if (!reference) throw new ApiError(400, "NO_REFERENCE", "Missing payment reference.");
-  const doc = await findPayment(reference);
+  const doc = await db.collection("payments").doc(reference).get();
   // Plan + owner come from OUR record, never from the app's request.
-  if (!doc || doc.data().uid !== req.uid) throw new ApiError(404, "UNKNOWN_PAYMENT", "We couldn't find that payment.");
+  if (!doc.exists || doc.data().uid !== req.uid) throw new ApiError(404, "UNKNOWN_PAYMENT", "We couldn't find that payment.");
 
   const pay = doc.data();
   if (pay.status !== "PAID") {
-    const v = await monnify.verify(pay.transactionReference);
-    if (v.paymentStatus !== "PAID") {
+    const v = await paystack.verify(reference);
+    if (v.status !== "success") {
       throw new ApiError(402, "NOT_PAID", "Your payment hasn't been confirmed yet. If you were charged, wait a minute and try again.");
     }
-    if (Number(v.amountPaid) < pay.amount) throw new ApiError(402, "UNDERPAID", "The amount paid doesn't match the plan price. Please contact support.");
-
-    const plan = PLANS[pay.plan];
-    await db.runTransaction(async (t) => {
-      const p = await t.get(doc.ref);
-      if (p.data().status === "PAID") return; // already granted (double tap / retry)
-      const u = (await t.get(userRef(req.uid))).data() || {};
-      t.set(userRef(req.uid), {
-        subscriptionTier: plan.tier, premiumPlan: pay.plan,
-        premiumExpiryMs: nextExpiry(u, plan.tier, plan.days), lastPaymentAt: Date.now(),
-      }, { merge: true });
-      t.update(doc.ref, { status: "PAID", paidAt: Date.now(), amountPaid: Number(v.amountPaid) });
-    });
+    if (!paidInFull(v, pay)) throw new ApiError(402, "UNDERPAID", "The amount paid doesn't match the plan price. Please contact support.");
+    await grantPayment(doc.ref);
   }
 
   const s = subscriptionOf(await loadUser(req.uid));
