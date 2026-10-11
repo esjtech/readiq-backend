@@ -1,0 +1,25 @@
+services:
+  - type: web
+    name: readiq-api
+    runtime: node
+    plan: free            # change to "starter" before launch: free instances sleep and cold-start
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: FIREBASE_SERVICE_ACCOUNT
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY      # optional: AI voice + audio transcription
+        sync: false
+      - key: MONNIFY_API_KEY
+        sync: false
+      - key: MONNIFY_SECRET_KEY
+        sync: false
+      - key: MONNIFY_CONTRACT_CODE
+        sync: false
+      - key: MONNIFY_BASE_URL
+        value: https://sandbox.monnify.com   # switch to https://api.monnify.com when going live

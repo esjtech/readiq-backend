@@ -1,0 +1,43 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    // Subscription fields are written ONLY by the backend (Admin SDK).
+    function touchesProtected(keys) {
+      return keys.hasAny(['subscriptionTier', 'premiumPlan', 'premiumExpiryMs',
+                          'freeTrialUsed', 'freeTrialStartedAt', 'lastPaymentAt']);
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create: if signedIn() && request.auth.uid == uid
+                    && !touchesProtected(request.resource.data.keys());
+      allow update: if signedIn() && request.auth.uid == uid
+                    && !touchesProtected(request.resource.data.diff(resource.data).affectedKeys());
+      allow delete: if signedIn() && request.auth.uid == uid;
+
+      // documents, quiz_history, settings, ...
+      match /{sub=**} {
+        allow read, write: if signedIn() && request.auth.uid == uid;
+      }
+    }
+
+    // Device-to-device file transfers
+    match /transfers/{id} {
+      allow create: if signedIn() && request.resource.data.senderId == request.auth.uid;
+      allow read: if signedIn() && (resource.data.senderId == request.auth.uid
+                                 || resource.data.recipientId == request.auth.uid);
+      allow update: if signedIn() && (resource.data.senderId == request.auth.uid
+                                   || resource.data.recipientId == request.auth.uid)
+                    && request.resource.data.senderId == resource.data.senderId
+                    && request.resource.data.recipientId == resource.data.recipientId;
+      allow delete: if signedIn() && (resource.data.senderId == request.auth.uid
+                                   || resource.data.recipientId == request.auth.uid);
+    }
+
+    // Backend-only collections (credits, payments, promo codes)
+    match /{document=**} { allow read, write: if false; }
+  }
+}

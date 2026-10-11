@@ -1,0 +1,23 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Cloud copies of a user's own documents: user_documents/{uid}/{docId}/{file}
+    match /user_documents/{uid}/{allPaths=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // QR sharing: shared_docs/{uid}/... – owner uploads, any signed-in user can open a shared link
+    match /shared_docs/{uid}/{allPaths=**} {
+      allow write: if request.auth != null && request.auth.uid == uid
+                   && request.resource.size < 50 * 1024 * 1024;
+      allow read: if request.auth != null;
+    }
+
+    // Device-to-device transfers: transfers/{transferId}/{fileId}/{name}
+    match /transfers/{transferId}/{allPaths=**} {
+      allow write: if request.auth != null && request.resource.size < 50 * 1024 * 1024;
+      allow read: if request.auth != null;
+    }
+  }
+}
