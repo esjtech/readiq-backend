@@ -66,7 +66,7 @@ app.use("/api", async (req, res, next) => {
 /** Charges credits for a feature, and tells us what the user holds. */
 async function meter(req, feature) {
   const sub = subscriptionOf(await loadUser(req.uid));
-  const refund = await credits.spend(req.uid, feature, sub.active);
+  const refund = await credits.spend(req.uid, feature, credits.ctxFor(sub));
   return { sub, premium: sub.tier === "PREMIUM", refund };
 }
 
@@ -133,10 +133,8 @@ app.post("/api/generate-quiz", wrap(async (req, res) => {
   } catch (e) { await refund(); throw e; }
 }));
 
-// ───────────── AI: tutor (Premium) ─────────────
+// ───────────── AI: tutor (Premium unlimited; Free & Lite unlock messages by watching rewarded ads) ─────────────
 app.post("/api/tutor/chat", wrap(async (req, res) => {
-  const sub = subscriptionOf(await loadUser(req.uid));
-  if (sub.tier !== "PREMIUM") throw new ApiError(403, "AI_PREMIUM_REQUIRED", "AI Tutor is a ReadIQ Premium feature.");
 
   let msgs = (Array.isArray(req.body.messages) ? req.body.messages : [])
     .filter((m) => m && (m.role === "user" || m.role === "assistant") && String(m.content || "").trim())
@@ -226,21 +224,21 @@ app.post("/api/convert-doc-to-pdf", wrap(async () => {
 }));
 
 // ───────────── Credits + usage ─────────────
-const unmeteredFor = async (uid) => subscriptionOf(await loadUser(uid)).active;
+const ctxOf = async (uid) => credits.ctxFor(subscriptionOf(await loadUser(uid)));
 
 app.get("/api/credits", wrap(async (req, res) => {
-  res.json({ success: true, ...(await credits.getBalance(req.uid, await unmeteredFor(req.uid))) });
+  res.json({ success: true, ...(await credits.getBalance(req.uid, await ctxOf(req.uid))) });
 }));
 
 // NOTE: trusts the app to say an ad finished (capped per day). Add AdMob server-side verification before launch.
 app.post("/api/credits/reward", wrap(async (req, res) => {
-  res.json({ success: true, balance: await credits.claimAdReward(req.uid, await unmeteredFor(req.uid)) });
+  res.json({ success: true, balance: await credits.claimAdReward(req.uid, await ctxOf(req.uid)) });
 }));
 
 app.get("/api/ai-usage", wrap(async (req, res) => {
-  const unmetered = await unmeteredFor(req.uid);
-  res.json({ success: true, isPremium: unmetered, enforcement: { blocking: true },
-    features: await credits.usageReport(req.uid, unmetered) });
+  const ctx = await ctxOf(req.uid);
+  res.json({ success: true, isPremium: ctx.unmetered, enforcement: { blocking: true },
+    features: await credits.usageReport(req.uid, ctx) });
 }));
 
 // ───────────── Welcome trial (3-day Premium, once per account) ─────────────

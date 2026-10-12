@@ -15,3 +15,15 @@ Firebase Auth verifies every request; Firestore stores user + subscription data;
 | POST /api/convert-doc-to-pdf | Not built yet (returns 501) |
 
 Create a code: `FIREBASE_SERVICE_ACCOUNT='<json>' node scripts/create-code.js READIQ2026 PREMIUM monthly 30 100`
+
+## Plans and credits
+| Plan | Price | AI use | Ads |
+|---|---|---|---|
+| Free | ₦0 | 5 credits/day (+2 per rewarded ad, max 5 ads/day) | yes |
+| Lite | ₦2,500 / year | 10 credits/day (+2 per rewarded ad) | yes |
+| Premium | ₦1,300 / month or ₦14,000 / year | unlimited | no |
+
+Costs: summary 1, tutor message 1, quiz 2, voice 2, transcription 3.
+AI Tutor messages for Free and Lite come only from rewarded-ad credits; Premium is unlimited.
+Tune with env vars: `FREE_DAILY_CREDITS`, `LITE_DAILY_CREDITS`, `AD_REWARD_CREDITS`, `MAX_REWARDED_ADS_PER_DAY`, `PRICE_*`.
+Payments are one-off Paystack charges that add time to the plan (no automatic renewal).
