@@ -18,6 +18,7 @@ app.use(rateLimit({ windowMs: 60_000, max: 90, standardHeaders: true, legacyHead
 const wrap = (fn) => (req, res) => fn(req, res).catch((e) => sendError(res, e));
 const userRef = (uid) => db.collection("users").doc(uid);
 const loadUser = async (uid) => { const s = await userRef(uid).get(); return s.exists ? s.data() : {}; };
+const TRIAL_DAYS = Number(process.env.TRIAL_DAYS || 7);
 const publicUrl = () => (process.env.PUBLIC_URL || process.env.RENDER_EXTERNAL_URL || "").replace(/\/$/, "");
 
 // ───────────── Health + payment landing page (no auth) ─────────────
@@ -241,14 +242,14 @@ app.get("/api/ai-usage", wrap(async (req, res) => {
     features: await credits.usageReport(req.uid, ctx) });
 }));
 
-// ───────────── Welcome trial (3-day Premium, once per account) ─────────────
+// ───────────── Welcome trial (7 days of Premium, once per account) ─────────────
 app.post("/api/start-trial", wrap(async (req, res) => {
   const ref = userRef(req.uid);
   const out = await db.runTransaction(async (t) => {
     const d = (await t.get(ref)).data() || {};
     if (d.freeTrialUsed) throw new ApiError(409, "TRIAL_USED", "Your free trial has already been used.");
     if (subscriptionOf(d).active) throw new ApiError(409, "ALREADY_SUBSCRIBED", "You already have an active plan.");
-    const expiry = Date.now() + 3 * DAY_MS;
+    const expiry = Date.now() + TRIAL_DAYS * DAY_MS;
     t.set(ref, { subscriptionTier: "PREMIUM", premiumPlan: "trial", premiumExpiryMs: expiry,
       freeTrialUsed: true, freeTrialStartedAt: Date.now() }, { merge: true });
     return expiry;

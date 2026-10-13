@@ -9,7 +9,7 @@ Firebase Auth verifies every request; Firestore stores user + subscription data;
 | POST /api/tutor/chat | Claude tutor, Premium only |
 | POST /api/tts, /api/transcribe-audio | OpenAI voice / speech-to-text (optional) |
 | GET /api/credits, POST /api/credits/reward, GET /api/ai-usage | Daily credit balance |
-| POST /api/start-trial | One-time 3-day Premium trial |
+| POST /api/start-trial | One-time 7-day Premium trial (everything unlocked, no ads) |
 | POST /api/init-payment, /api/verify-payment | Paystack checkout + verification (+ /webhook/paystack) |
 | POST /api/redeem-code | Promo/gift codes |
 | POST /api/convert-doc-to-pdf | Not built yet (returns 501) |
