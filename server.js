@@ -9,6 +9,8 @@ const { PLANS, DAY_MS, subscriptionOf, nextExpiry } = require("./lib/plans");
 const credits = require("./lib/credits");
 const ai = require("./lib/ai");
 const paystack = require("./lib/paystack");
+const { redeemCode } = require("./lib/redeem");
+const { buildTutorSystem } = require("./lib/tutorPrompt");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -91,9 +93,9 @@ app.post("/api/generate-quiz", wrap(async (req, res) => {
   const b = req.body || {};
   const source = ai.clip(b.sourceText, 60_000).trim();
   if (source.length < 50) throw new ApiError(400, "TEXT_TOO_SHORT", "There isn't enough text to build a quiz from.");
-  const { premium, refund } = await meter(req, "quiz");
+  const { refund } = await meter(req, "quiz");
 
-  const count = Math.min(Math.max(parseInt(b.questionCount, 10) || 5, 1), premium ? 30 : 15);
+  const count = Math.min(Math.max(parseInt(b.questionCount, 10) || 5, 1), 60);   // the app offers 5-60
   const type = ["MULTIPLE_CHOICE", "TRUE_FALSE", "SHORT_ANSWER"].includes(b.questionType) ? b.questionType : "MULTIPLE_CHOICE";
   const difficulty = ["Easy", "Medium", "Hard"].includes(b.difficulty) ? b.difficulty : "Medium";
   const title = ai.clip(b.title || "AI Quiz", 120);
@@ -105,16 +107,29 @@ app.post("/api/generate-quiz", wrap(async (req, res) => {
     SHORT_ANSWER: 'each question has "options": [] and a "modelAnswer" string (1-2 sentences); "correctAnswerIndex": -1',
   }[type];
 
-  try {
+  // One model call writes `n` questions from `text`.
+  const generate = async (n, text) => {
     const raw = await ai.claude({
-      system: `You write quizzes from study material. Reply with ONLY a JSON object, no markdown: {"title": string, "questions": [{"question": string, "options": string[], "correctAnswerIndex": number, "modelAnswer": string, "explanation": string}]}. Write exactly ${count} ${difficulty.toLowerCase()} questions; ${shape}. ${explain ? 'Each "explanation" is one short sentence.' : 'Set "explanation" to "".'} Only use facts found in the material.`,
-      messages: [{ role: "user", content: `Quiz title: ${title}\n\nMaterial:\n${source}` }],
-      maxTokens: Math.min(600 + count * 260, 8000),
+      system: `You write quizzes from study material. Reply with ONLY a JSON object, no markdown: {"title": string, "questions": [{"question": string, "options": string[], "correctAnswerIndex": number, "modelAnswer": string, "explanation": string}]}. Write exactly ${n} ${difficulty.toLowerCase()} questions; ${shape}. ${explain ? 'Each "explanation" is one short sentence.' : 'Set "explanation" to "".'} Only use facts found in the material.`,
+      messages: [{ role: "user", content: `Quiz title: ${title}\n\nMaterial:\n${text}` }],
+      maxTokens: Math.min(600 + n * 260, 9000),
     });
-
-    let parsed;
-    try { parsed = ai.parseJsonObject(raw); }
+    try { return ai.parseJsonObject(raw); }
     catch { throw new ApiError(502, "AI_BAD_OUTPUT", "The AI returned an unreadable quiz. Please try again."); }
+  };
+
+  try {
+    let parsed;
+    if (count > 30) {
+      // Big quiz: two parallel calls, each on its own half of the material, so it finishes in time.
+      const mid = source.indexOf("\n", Math.floor(source.length / 2));
+      const cut = mid > 0 ? mid : Math.floor(source.length / 2);
+      const nA = Math.ceil(count / 2);
+      const [a1, a2] = await Promise.all([generate(nA, source.slice(0, cut)), generate(count - nA, source.slice(cut))]);
+      parsed = { title: a1.title || a2.title, questions: [...(a1.questions || []), ...(a2.questions || [])] };
+    } else {
+      parsed = await generate(count, source);
+    }
 
     const questions = (Array.isArray(parsed.questions) ? parsed.questions : []).map((q) => {
       let options = Array.isArray(q.options) ? q.options.map(String) : [];
@@ -144,15 +159,15 @@ app.post("/api/tutor/chat", wrap(async (req, res) => {
   while (msgs.length && msgs[0].role !== "user") msgs.shift();
   if (!msgs.length || msgs[msgs.length - 1].role !== "user") throw new ApiError(400, "NO_MESSAGE", "Please type a question first.");
 
-  const context = ai.clip(req.body.context, 3000).trim();
-  const svgRule = req.body.illustration_mode
-    ? "When a diagram would genuinely help, add ONE simple illustration as a self-contained SVG wrapped in [SVG]...[/SVG] after your explanation (use a viewBox, plain shapes and text, no scripts, no external images). Skip it when it wouldn't help."
-    : "Do not include SVG.";
+  const system = buildTutorSystem({
+    illustration: !!req.body.illustration_mode,
+    context: ai.clip(req.body.context, 3000).trim(),
+  });
 
   const { refund } = await meter(req, "tutor");
   try {
     const reply = ai.sanitizeSvgBlocks(await ai.claude({
-      system: `You are ReadIQ's friendly AI tutor. Explain clearly, step by step, at a student's level. Keep answers focused and use short paragraphs. ${svgRule}${context ? `\n\nThe student is reading this material:\n${context}` : ""}`,
+      system,
       messages: msgs,
       maxTokens: 1800,
     }));
@@ -242,6 +257,14 @@ app.get("/api/ai-usage", wrap(async (req, res) => {
     features: await credits.usageReport(req.uid, ctx) });
 }));
 
+// ───────────── 1-hour feature pass (AI Tutor) ─────────────
+// NOTE: like rewarded-ad credits, this trusts the app to say an ad finished (capped per day).
+app.post("/api/feature-pass", wrap(async (req, res) => {
+  if (req.body.feature !== "tutor") throw new ApiError(400, "BAD_FEATURE", "That feature doesn't use a server pass.");
+  const until = await credits.grantTutorPass(req.uid);
+  res.json({ success: true, feature: "tutor", until });
+}));
+
 // ───────────── Welcome trial (7 days of Premium, once per account) ─────────────
 app.post("/api/start-trial", wrap(async (req, res) => {
   const ref = userRef(req.uid);
@@ -321,30 +344,10 @@ app.post("/api/verify-payment", wrap(async (req, res) => {
 
 // ───────────── Promo / gift codes ─────────────
 app.post("/api/redeem-code", wrap(async (req, res) => {
-  const code = String(req.body.code || "").trim().toUpperCase();
-  if (!/^[A-Z0-9_-]{3,40}$/.test(code)) throw new ApiError(400, "BAD_CODE", "That code doesn't look right. Check it and try again.");
-
-  const codeRef = db.collection("redeemCodes").doc(code);
-  const result = await db.runTransaction(async (t) => {
-    const [c, used, u] = await Promise.all([t.get(codeRef), t.get(codeRef.collection("redemptions").doc(req.uid)), t.get(userRef(req.uid))]);
-    const d = c.data();
-    if (!c.exists || d.active === false) throw new ApiError(404, "NO_SUCH_CODE", "That code isn't valid.");
-    if (d.expiresAtMs && Date.now() > d.expiresAtMs) throw new ApiError(410, "CODE_EXPIRED", "That code has expired.");
-    if (d.maxUses && (d.usedCount || 0) >= d.maxUses) throw new ApiError(410, "CODE_USED_UP", "That code has already been fully used.");
-    if (used.exists) throw new ApiError(409, "ALREADY_REDEEMED", "You've already used this code.");
-
-    const tier = d.tier === "LITE_YEARLY" ? "LITE_YEARLY" : "PREMIUM";
-    const plan = d.plan || "promo";
-    const expiry = nextExpiry(u.data() || {}, tier, Number(d.durationDays) || 30);
-    t.set(userRef(req.uid), { subscriptionTier: tier, premiumPlan: plan, premiumExpiryMs: expiry }, { merge: true });
-    t.update(codeRef, { usedCount: (d.usedCount || 0) + 1 });
-    t.set(codeRef.collection("redemptions").doc(req.uid), { at: Date.now() });
-    return { tier, plan, expiry };
-  });
-
-  const when = new Date(result.expiry).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
-  res.json({ success: true, tier: result.tier, plan: result.plan, premiumExpiryMs: result.expiry,
-    message: `Code accepted! Your plan is active until ${when}.` });
+  const r = await redeemCode(req.uid, req.body.code);
+  const when = new Date(r.expiry).toLocaleDateString("en-GB", { day: "numeric", month: "short", year: "numeric" });
+  res.json({ success: true, tier: r.tier, plan: r.plan, premiumExpiryMs: r.expiry,
+    message: `Code accepted! You have ${r.tier === "PREMIUM" ? "Premium" : "Lite"} until ${when}.` });
 }));
 
 app.use("/api", (_q, r) => sendError(r, new ApiError(404, "NOT_FOUND", "Unknown endpoint.")));
