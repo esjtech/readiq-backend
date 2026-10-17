@@ -15,5 +15,7 @@ services:
         sync: false
       - key: OPENAI_API_KEY      # optional: AI voice + audio transcription
         sync: false
+      - key: CONVERTAPI_SECRET    # online Word/HTML to PDF (plain .txt works without it)
+        sync: false
       - key: PAYSTACK_SECRET_KEY   # sk_test_... while testing, sk_live_... for real money
         sync: false

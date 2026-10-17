@@ -12,7 +12,7 @@ Firebase Auth verifies every request; Firestore stores user + subscription data;
 | POST /api/start-trial | One-time 7-day Premium trial (everything unlocked, no ads) |
 | POST /api/init-payment, /api/verify-payment | Paystack checkout + verification (+ /webhook/paystack) |
 | POST /api/redeem-code | Promo/gift codes |
-| POST /api/convert-doc-to-pdf | Not built yet (returns 501) |
+| POST /api/convert-doc-to-pdf, GET /files/<token>.pdf | Word/HTML/text to PDF (.txt built in; others via ConvertAPI). 5 a day free/Lite, 30 Premium |
 
 Promo codes: `promo/seven-day-premium.json` holds SHA-256 hashes of 50 single-use codes (7 days of Premium each). The codes themselves are not in the repo. Add another batch by dropping a new JSON file in `promo/`.
 

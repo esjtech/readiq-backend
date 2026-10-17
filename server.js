@@ -11,6 +11,8 @@ const ai = require("./lib/ai");
 const paystack = require("./lib/paystack");
 const { redeemCode } = require("./lib/redeem");
 const { buildTutorSystem } = require("./lib/tutorPrompt");
+const { convertToPdf, docKind } = require("./lib/convert");
+const fileStore = require("./lib/fileStore");
 
 const app = express();
 app.set("trust proxy", 1);
@@ -50,6 +52,14 @@ app.post("/webhook/paystack", async (req, res) => {
     console.error("Webhook error", e.message);
     res.sendStatus(500); // Paystack will retry
   }
+});
+
+// Converted PDFs are fetched by the app with a plain GET, so the link itself is the secret (48 random hex characters, 15 minutes).
+app.get(/^\/files\/([a-f0-9]{48})\.pdf$/, (req, res) => {
+  const e = fileStore.get(req.params[0]);
+  if (!e) return res.status(404).type("text").send("This link has expired.");
+  res.set({ "Content-Type": "application/pdf", "Content-Disposition": `inline; filename="${e.name}"`, "Cache-Control": "no-store" });
+  res.send(e.buffer);
 });
 
 // ───────────── Auth: every /api route below needs a Firebase ID token ─────────────
@@ -200,9 +210,13 @@ app.post("/api/tts", wrap(async (req, res) => {
 }));
 
 // ───────────── Audio: transcription (needs OPENAI_API_KEY) ─────────────
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } }).single("audio");
-const parseUpload = (req, res) => new Promise((ok, no) => upload(req, res, (e) =>
-  e ? no(e.code === "LIMIT_FILE_SIZE" ? new ApiError(413, "FILE_TOO_BIG", "That recording is too large (25 MB max).") : new ApiError(400, "BAD_UPLOAD", "Couldn't read the upload.")) : ok()));
+const makeParser = (field, maxMb, tooBigMsg) => {
+  const mw = multer({ storage: multer.memoryStorage(), limits: { fileSize: maxMb * 1024 * 1024 } }).single(field);
+  return (req, res) => new Promise((ok, no) => mw(req, res, (e) =>
+    e ? no(e.code === "LIMIT_FILE_SIZE" ? new ApiError(413, "FILE_TOO_BIG", tooBigMsg) : new ApiError(400, "BAD_UPLOAD", "Couldn't read the upload.")) : ok()));
+};
+const parseUpload = makeParser("audio", 25, "That recording is too large (25 MB max).");
+const parseDocUpload = makeParser("file", 20, "That document is too large (20 MB max).");
 
 app.post("/api/transcribe-audio", wrap(async (req, res) => {
   if (!process.env.OPENAI_API_KEY) throw new ApiError(503, "STT_NOT_CONFIGURED", "Audio transcription isn't available yet.");
@@ -234,9 +248,23 @@ app.post("/api/transcribe-audio", wrap(async (req, res) => {
   } catch (e) { await refund(); throw e instanceof ApiError ? e : new ApiError(504, "STT_TIMEOUT", "Transcription took too long. Try a shorter recording."); }
 }));
 
-// ───────────── Word/Office → PDF (not built yet) ─────────────
-app.post("/api/convert-doc-to-pdf", wrap(async () => {
-  throw new ApiError(501, "NOT_IMPLEMENTED", "Document conversion isn't available yet.");
+// ───────────── Word/Office → PDF ─────────────
+app.post("/api/convert-doc-to-pdf", wrap(async (req, res) => {
+  await parseDocUpload(req, res);
+  const f = req.file;
+  if (!f || !f.buffer || !f.buffer.length) throw new ApiError(400, "NO_FILE", "Choose a document first.");
+
+  const kind = docKind(f.originalname, f.buffer);
+  if (!kind) throw new ApiError(415, "UNSUPPORTED", "That file type isn't supported. Use .doc, .docx, .txt or .html.");
+
+  const sub = subscriptionOf(await loadUser(req.uid));
+  const refund = await credits.spendConversion(req.uid, credits.ctxFor(sub));
+  try {
+    const pdf = await convertToPdf({ buffer: f.buffer, kind });
+    const base = String(f.originalname || "document").replace(/\.[^.]+$/, "").replace(/[^\w .-]/g, "_").slice(0, 80) || "document";
+    const id = fileStore.put(pdf, `${base}.pdf`);
+    res.json({ success: true, pdfUrl: `${publicUrl()}/files/${id}.pdf` });
+  } catch (e) { await refund(); throw e; }
 }));
 
 // ───────────── Credits + usage ─────────────
